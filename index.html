@@ -1164,13 +1164,38 @@ function renderLogin(){
   const empBtn = document.getElementById('loginEmp');
   if(empBtn){
     empBtn.onclick = async () => {
-      const uid = document.getElementById('loginUser').value;
-      const pwd = (document.getElementById('loginUserPwd')?.value || '').trim();
-      if (!uid) { alert('Select an employee account.'); return; }
-      const user = state.users[uid];
-      const storedPwd = user?.password || '';
-      if (!pwd) { alert('Please enter a password.'); return; }
-      if (pwd === storedPwd) {
+    const uid = document.getElementById('loginUser').value;
+const pwd = (document.getElementById('loginUserPwd')?.value || '').trim();
+if (!uid || !pwd) { alert('Please enter a password.'); return; }
+
+const auth = (state && state.userAuth && state.userAuth[uid]) || null;
+
+let ok = false;
+if (auth && auth.hash && auth.salt){
+  try{
+    const { hashHex } = await hashPassword(pwd, auth.salt);
+    ok = (hashHex === auth.hash);
+  } catch(e){ ok = false; }
+} else {
+  // Fallback if we haven’t migrated this user yet
+  const localUser = state.users && state.users[uid];
+  const storedPwd = (localUser && localUser.password) || '';
+  ok = (storedPwd && pwd === storedPwd);
+}
+
+if (ok) {
+  state.currentUserId = uid;
+  // Load remote state (already hydrated, but keep this if you had it)
+  const remote = await loadRemoteState?.();
+  if (remote && typeof remote === 'object') {
+    const localUsers = state.users; // keep local-only users
+    state = window.state = { ...state, ...remote, users: localUsers };
+  }
+  save();
+  render();
+} else {
+  alert('Incorrect password.');
+}
         // Set the logged in user id
         state.currentUserId = uid;
         const remote = await loadRemoteState();
@@ -7268,10 +7293,11 @@ render();
     merged.users = keepUsers;
     return merged;
   }
-  function prepareCloudState(st){
-    const { users, ...rest } = st || {};
-    return { ...rest, _hasUsers: !!users };
-  }
+ function prepareCloudState(st){
+  const { users, ...rest } = st || {};
+  // Keep userAuth in cloud so incognito can login
+  return { ...rest, userAuth: (st && st.userAuth) || rest.userAuth || {} };
+}
 
   async function hydrateFromCloud(){
     try{
@@ -7299,7 +7325,38 @@ render();
       window.hydrated = true;             // NEW
 window.lastRevision = lastRevision;  // NEW
 window.lastSeenISO = lastSeenISO;    // NEW
+      async function migrateUsersToAuth(){
+  try{
+    const s = window.state || {};
+    s.userAuth = s.userAuth || {};
+    const users = s.users || {};
+    let changed = false;
+
+    for (const uid of Object.keys(users)){
+      const u = users[uid] || {};
+      const plain = (u.password || '').trim();
+      if (!s.userAuth[uid] && plain){
+        // create hash record from local plaintext
+        const { hashHex, saltHex } = await hashPassword(plain);
+        s.userAuth[uid] = {
+          hash: hashHex,
+          salt: saltHex,
+          role: u.role || (uid==='u-OWNER' ? 'owner' : 'employee'),
+          name: u.name || uid
+        };
+        changed = true;
+      }
+    }
+    if (changed){
+      window.state = s;
+      try { localStorage.setItem('marlow.dashboard.v23', JSON.stringify(s)); } catch(_){}
+      if (typeof window.save === 'function') window.save();
+      console.log('[auth] migrated local users → userAuth');
+    }
+  } catch(e){ console.warn('[auth] migrate error', e); }
+}
       console.log('[cloud] hydrated rev', lastRevision);
+      await migrateUsersToAuth();  // <--- add this line
     } catch(e){ console.warn('[cloud] hydrate exception', e); }
   }
 
@@ -7342,7 +7399,34 @@ window.lastSeenISO = lastSeenISO;    // NEW
   window.lastSeenISO = lastSeenISO;      // NEW
         return;
       }
+// --- Password hashing (SHA-256) ---
+async function sha256Hex(bytes){
+  const buf = await crypto.subtle.digest('SHA-256', bytes);
+  const out = Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+  return out;
+}
+function utf8(str){ return new TextEncoder().encode(str); }
+function hexToBytes(hex){
+  const arr = new Uint8Array(hex.length/2);
+  for(let i=0;i<arr.length;i++) arr[i] = parseInt(hex.substr(i*2,2),16);
+  return arr;
+}
+function randSaltHex(len=16){
+  const b = new Uint8Array(len);
+  crypto.getRandomValues(b);
+  return Array.from(b).map(x=>x.toString(16).padStart(2,'0')).join('');
+}
 
+/** Hash a password with salt (generate salt if absent) */
+async function hashPassword(password, saltHex){
+  const salt = saltHex ? hexToBytes(saltHex) : null;
+  const saltOut = saltHex || randSaltHex(16);
+  const combined = new Uint8Array((salt? salt.length:0) + utf8(password).length);
+  if (salt) combined.set(salt, 0);
+  combined.set(utf8(password), salt ? salt.length : 0);
+  const hashHex = await sha256Hex(combined);
+  return { hashHex, saltHex: saltOut };
+}
       // conflict: pull latest, merge, and try once more
       const latest = await window.supa
         .from('app_state')
