@@ -856,17 +856,16 @@ const STORE_KEY = "marlow.dashboard.v23";
 // function is a no-op when Firebase is not configured.  Saving remotely
 // enables multiple users to share the same dashboard data across devices.
 // Disabled remote persistence.  In local‑only mode this function does nothing.
-async function saveRemoteState(){
-  try{
-    if(!window.supa){ console.warn('[supa] client missing'); return; }
-    const st = window.state || {};
-    const { users, ...rest } = st;
-    const safe = { ...rest, _hasUsers: !!users };
-    const { error } = await window.supa
-      .from('app_state')
-      .upsert({ id: window.WORKSPACE_ID, state: safe, updated_at: new Date().toISOString() }, { onConflict: 'id' });
-    if (error) console.warn('[supa] save error', error);
-  }catch(e){ console.warn('[supa] save exception', e); }
+async function initializeCloudRow(){
+  const safe = prepareCloudState(state);
+  await window.supa
+    .from('app_state')
+    .upsert({
+      id: window.WORKSPACE_ID,
+      state: safe,
+      revision: 0,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'id' }); // <-- no .select() here
 }
 
 // Load dashboard state from Firestore for the given user ID.  Returns null
@@ -7283,17 +7282,17 @@ render();
         return { ...rest, _hasUsers: !!users };
       }
       // Initialize row in Supabase if missing
-      async function initializeCloudRow(){
-        try{
-          const safe = prepareCloudState(state);
-          await window.supa
-            .from('app_state')
-            .upsert({ id: window.WORKSPACE_ID, state: safe, revision: 0, updated_at: new Date().toISOString() }, { onConflict: 'id' })
-            .select()
-            .single();
-        } catch(e){
-          console.warn('[cloud] init error', e);
-        }
+    async function initializeCloudRow(){
+  const safe = prepareCloudState(state);
+  await window.supa
+    .from('app_state')
+    .upsert({
+      id: window.WORKSPACE_ID,
+      state: safe,
+      revision: 0,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'id' }); // <-- no .select() here
+}
       }
       // Hydrate state from Supabase
       async function hydrateFromCloud(){
