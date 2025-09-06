@@ -7432,7 +7432,33 @@ window.hydrateFromCloud = hydrateFromCloud; // NEW
   })();
 })();
 </script>
+  <!-- your cloud sync block -->
+<script>
+  …cloud sync code here…
+</script>
 
+<!-- autosave helper: triggers save() after typical user actions -->
+<script>
+(function(){
+  let t = null;
+  function debouncedSave(ms = 250){
+    if (typeof window.save !== 'function') return;
+    clearTimeout(t);
+    t = setTimeout(() => {
+      try { window.save(); } catch (_){}
+    }, ms);
+  }
+  document.addEventListener('input',  () => debouncedSave(300), true);
+  document.addEventListener('change', () => debouncedSave(300), true);
+  document.addEventListener('click',  e => {
+    if (e.target.closest('button')) debouncedSave(120);
+  }, true);
+  // heartbeat save every 5 seconds
+  setInterval(() => {
+    try { window.save && window.save(); } catch (_){}
+  }, 5000);
+})();
+</script>
 <!-- Supabase cloud sync handled internally; removed external cloud bridge scripts -->
 </body>
 </html>
