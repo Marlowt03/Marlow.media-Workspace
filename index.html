@@ -7255,199 +7255,171 @@ render();
 })();
 </script>
 
-    <!-- Supabase cloud sync implementation -->
-    <script>
-    (() => {
-      // Supabase revision-locked cloud sync and realtime subscription
-      // Persist data using Supabase as the source of truth. This removes Firebase and external bridges.
-      let hydrated = false;
-      let saving = false;
-      let lastRevision = 0;
-      let lastSeenISO = null;
-      // Merge remote state into local state while preserving existing users
-      function mergeRemoteIntoLocal(remoteState){
-        try{
-          const keepUsers = deepClone((state && state.users) || {});
-          const merged = Object.assign({}, deepClone(state || {}), deepClone(remoteState || {}));
-          merged.users = keepUsers;
-          return merged;
-        } catch(e){
-          console.warn('[cloud] merge error', e);
-          return remoteState || {};
+   <!-- Supabase cloud sync (single source of truth, revision-locked) -->
+<script>
+;(() => {
+  const STORE_KEY = 'marlow.dashboard.v23';
+  let hydrated = false, saving = false, lastRevision = 0, lastSeenISO = null;
+
+  function deepClone(o){ try { return JSON.parse(JSON.stringify(o)); } catch(_) { return {}; } }
+  function mergeRemoteIntoLocal(remote){
+    const keepUsers = deepClone((window.state && window.state.users) || {});
+    const merged = Object.assign({}, window.state || {}, remote || {});
+    merged.users = keepUsers;
+    return merged;
+  }
+  function prepareCloudState(st){
+    const { users, ...rest } = st || {};
+    return { ...rest, _hasUsers: !!users };
+  }
+
+  async function hydrateFromCloud(){
+    try{
+      const { data, error } = await window.supa
+        .from('app_state')
+        .select('state, revision, updated_at')
+        .eq('id', window.WORKSPACE_ID)
+        .single();
+
+      if (error && error.code !== 'PGRST116') {  // not found is OK
+        console.warn('[cloud] load error', error);
+        return;
+      }
+
+      if (data && data.state){
+        window.state = mergeRemoteIntoLocal(data.state);
+        lastRevision = data.revision || 0;
+        lastSeenISO = data.updated_at || null;
+      } else {
+        await initializeCloudRow();
+      }
+
+      try { localStorage.setItem(STORE_KEY, JSON.stringify(window.state)); } catch(_){}
+      hydrated = true;
+      console.log('[cloud] hydrated rev', lastRevision);
+    } catch(e){ console.warn('[cloud] hydrate exception', e); }
+  }
+
+  async function initializeCloudRow(){
+    const safe = prepareCloudState(window.state);
+    // NOTE: no .select() here (it would emit a bad GET with on_conflict=...)
+    await window.supa
+      .from('app_state')
+      .upsert({
+        id: window.WORKSPACE_ID,
+        state: safe,
+        revision: 0,
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'id' });
+  }
+
+  async function saveCloud(){
+    if (!hydrated || saving) return;
+    saving = true;
+    try {
+      const safe = prepareCloudState(window.state);
+
+      // optimistic update where revision matches
+      const { data, error } = await window.supa
+        .from('app_state')
+        .update({
+          state: safe,
+          revision: lastRevision + 1,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', window.WORKSPACE_ID)
+        .eq('revision', lastRevision)
+        .select('revision, updated_at')
+        .single();
+
+      if (!error && data){
+        lastRevision = data.revision;
+        lastSeenISO = data.updated_at;
+        return;
+      }
+
+      // conflict: pull latest, merge, and try once more
+      const latest = await window.supa
+        .from('app_state')
+        .select('state, revision, updated_at')
+        .eq('id', window.WORKSPACE_ID)
+        .single();
+
+      if (latest.data){
+        window.state = mergeRemoteIntoLocal(latest.data.state || {});
+        lastRevision = latest.data.revision || 0;
+        lastSeenISO = latest.data.updated_at || null;
+        try { localStorage.setItem(STORE_KEY, JSON.stringify(window.state)); } catch(_){}
+
+        const again = await window.supa
+          .from('app_state')
+          .update({
+            state: prepareCloudState(window.state),
+            revision: lastRevision + 1,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', window.WORKSPACE_ID)
+          .eq('revision', lastRevision)
+          .select('revision, updated_at')
+          .single();
+
+        if (again.data){
+          lastRevision = again.data.revision;
+          lastSeenISO = again.data.updated_at;
         }
       }
-      // Prepare state for upload by stripping local-only fields
-      function prepareCloudState(st){
-        const { users, ...rest } = st || {};
-        return { ...rest, _hasUsers: !!users };
+    } finally { saving = false; }
+  }
+
+  function startRealtime(){
+    if (!window.supa || !window.supa.channel) return;
+    const ch = window.supa.channel('app_state_changes');
+    ch.on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'app_state', filter: `id=eq.${window.WORKSPACE_ID}` },
+      () => {
+        window.supa.from('app_state')
+          .select('state, revision, updated_at')
+          .eq('id', window.WORKSPACE_ID)
+          .single()
+          .then(({ data }) => {
+            if (!data) return;
+            if (data.updated_at === lastSeenISO) return;
+            lastRevision = data.revision || lastRevision;
+            lastSeenISO = data.updated_at || lastSeenISO;
+            window.state = mergeRemoteIntoLocal(data.state || {});
+            try { localStorage.setItem(STORE_KEY, JSON.stringify(window.state)); } catch(_){}
+            if (typeof window.render === 'function') { try { window.render(); } catch(_){ } }
+          });
       }
-      // Initialize row in Supabase if missing
-    async function initializeCloudRow(){
-  const safe = prepareCloudState(state);
-  await window.supa
-    .from('app_state')
-    .upsert({
-      id: window.WORKSPACE_ID,
-      state: safe,
-      revision: 0,
-      updated_at: new Date().toISOString()
-    }, { onConflict: 'id' }); // <-- no .select() here
-}
-      }
-      // Hydrate state from Supabase
-      async function hydrateFromCloud(){
-        if(!window.supa){ console.warn('[cloud] supa client missing'); return; }
-        try{
-          const { data, error } = await window.supa
-            .from('app_state')
-            .select('state, revision, updated_at')
-            .eq('id', window.WORKSPACE_ID)
-            .single();
-          if(error && error.code !== 'PGRST116'){ console.warn('[cloud] load error', error); }
-          if(data && typeof data.state === 'object'){
-            state = window.state = mergeRemoteIntoLocal(data.state);
-            lastRevision = data.revision || 0;
-            lastSeenISO = data.updated_at || null;
-          } else {
-            await initializeCloudRow();
-          }
-          try {
-            localStorage.setItem(STORE_KEY, JSON.stringify(state));
-          } catch(e){}
-          hydrated = true;
-        } catch(e){
-          console.warn('[cloud] hydrate exception', e);
-        }
-      }
-      // Save state to Supabase with optimistic concurrency control
-      async function saveCloud(){
-        if(!hydrated){ return; }
-        if(saving) return;
-        saving = true;
-        try{
-          const safe = prepareCloudState(state);
-          const { data, error } = await window.supa
-            .from('app_state')
-            .update({
-              state: safe,
-              revision: lastRevision + 1,
-              updated_at: new Date().toISOString()
-            })
-            .eq('id', window.WORKSPACE_ID)
-            .eq('revision', lastRevision)
-            .select('revision, updated_at')
-            .single();
-          if(!error && data){
-            lastRevision = data.revision;
-            lastSeenISO = data.updated_at;
-            return;
-          }
-          // Conflict: fetch latest and merge, then retry once
-          const latest = await window.supa
-            .from('app_state')
-            .select('state, revision, updated_at')
-            .eq('id', window.WORKSPACE_ID)
-            .single();
-          if(latest.data){
-            state = window.state = mergeRemoteIntoLocal(latest.data.state || {});
-            lastRevision = latest.data.revision || 0;
-            lastSeenISO = latest.data.updated_at || null;
-            try {
-              localStorage.setItem(STORE_KEY, JSON.stringify(state));
-            } catch(_){}
-            // retry
-            const safe2 = prepareCloudState(state);
-            const again = await window.supa
-              .from('app_state')
-              .update({
-                state: safe2,
-                revision: lastRevision + 1,
-                updated_at: new Date().toISOString()
-              })
-              .eq('id', window.WORKSPACE_ID)
-              .eq('revision', lastRevision)
-              .select('revision, updated_at')
-              .single();
-            if(again.data){
-              lastRevision = again.data.revision;
-              lastSeenISO = again.data.updated_at;
-            }
-          }
-        } catch(e){
-          console.warn('[cloud] save error', e);
-        } finally {
-          saving = false;
-        }
-      }
-      // Listen for realtime updates from Supabase
-      function startRealtime(){
-        if(!window.supa || !window.supa.channel) return;
-        const ch = window.supa.channel('app_state_changes');
-        ch.on(
-          'postgres_changes',
-          { event: '*', schema: 'public', table: 'app_state', filter: `id=eq.${window.WORKSPACE_ID}` },
-          (payload) => {
-            try{
-              const newISO = payload.new?.updated_at;
-              if(newISO && newISO === lastSeenISO) return;
-              window.supa.from('app_state')
-                .select('state, revision, updated_at')
-                .eq('id', window.WORKSPACE_ID)
-                .single()
-                .then(({ data }) => {
-                  if(!data) return;
-                  lastRevision = data.revision || lastRevision;
-                  lastSeenISO = data.updated_at || lastSeenISO;
-                  state = window.state = mergeRemoteIntoLocal(data.state || {});
-                  try {
-                    localStorage.setItem(STORE_KEY, JSON.stringify(state));
-                  } catch(_){}
-                  if(typeof render === 'function'){ render(); }
-                });
-            }catch(e){ console.warn('[cloud] realtime callback error', e); }
-          }
-        ).subscribe();
-      }
-      // Override saveRemoteState to use our concurrency saveCloud
-      window.saveRemoteState = async function(){
-        try{
-          if(!hydrated){ return; }
-          await saveCloud();
-        } catch(e){
-          console.warn('[cloud] saveRemoteState exception', e);
-        }
-      };
-      // Override loadRemoteState to fetch the latest state (without merging)
-      window.loadRemoteState = async function(){
-        try{
-          if(!window.supa){ console.warn('[cloud] supa client missing'); return null; }
-          const { data, error } = await window.supa
-            .from('app_state')
-            .select('state, revision, updated_at')
-            .eq('id', window.WORKSPACE_ID)
-            .single();
-          if(error && error.code !== 'PGRST116'){ console.warn('[cloud] load error', error); return null; }
-          if(data){
-            lastRevision = data.revision || 0;
-            lastSeenISO = data.updated_at || null;
-            return data.state || null;
-          }
-          return null;
-        } catch(e){
-          console.warn('[cloud] loadRemoteState exception', e);
-          return null;
-        }
-      };
-      // Kick off hydration and realtime after page load
-      hydrateFromCloud().then(() => {
-        try{
-          if(typeof applyTheme === 'function'){ applyTheme(); }
-          if(typeof render === 'function'){ render(); }
-        }catch(e){ console.warn('[cloud] render after hydrate failed', e); }
-        startRealtime();
-      });
-    })();
-    </script>
+    ).subscribe();
+  }
+
+  // Make save() also push to cloud (debounced)
+  const originalSave = window.save;
+  let cloudTimer = null;
+  window.save = function(...args){
+    try { if (typeof originalSave === 'function') originalSave.apply(this, args); } catch(_){}
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(window.state)); } catch(_){}
+    if (!hydrated) return;
+    clearTimeout(cloudTimer);
+    cloudTimer = setTimeout(saveCloud, 400);
+  };
+
+  // Boot: restore cache quickly, then cloud → render → realtime
+  try {
+    const cached = localStorage.getItem(STORE_KEY);
+    if (cached) { window.state = Object.assign(window.state || {}, JSON.parse(cached)); }
+  } catch(_){}
+
+  (async () => {
+    await hydrateFromCloud();
+    if (typeof window.applyTheme === 'function') { try { window.applyTheme(); } catch(_){ } }
+    if (typeof window.render === 'function') { try { window.render(); } catch(_){ } }
+    startRealtime();
+  })();
+})();
+</script>
 
 <!-- Supabase cloud sync handled internally; removed external cloud bridge scripts -->
 </body>
