@@ -7296,6 +7296,9 @@ render();
 
       try { localStorage.setItem(STORE_KEY, JSON.stringify(window.state)); } catch(_){}
       hydrated = true;
+      window.hydrated = true;             // NEW
+window.lastRevision = lastRevision;  // NEW
+window.lastSeenISO = lastSeenISO;    // NEW
       console.log('[cloud] hydrated rev', lastRevision);
     } catch(e){ console.warn('[cloud] hydrate exception', e); }
   }
@@ -7335,6 +7338,8 @@ render();
       if (!error && data){
         lastRevision = data.revision;
         lastSeenISO = data.updated_at;
+          window.lastRevision = lastRevision;    // NEW
+  window.lastSeenISO = lastSeenISO;      // NEW
         return;
       }
 
@@ -7366,6 +7371,8 @@ render();
         if (again.data){
           lastRevision = again.data.revision;
           lastSeenISO = again.data.updated_at;
+            window.lastRevision = lastRevision;    // NEW
+  window.lastSeenISO = lastSeenISO;      // NEW
         }
       }
     } finally { saving = false; }
@@ -7387,6 +7394,8 @@ render();
             if (data.updated_at === lastSeenISO) return;
             lastRevision = data.revision || lastRevision;
             lastSeenISO = data.updated_at || lastSeenISO;
+            window.lastRevision = lastRevision;     // NEW
+window.lastSeenISO = lastSeenISO;       // NEW
             window.state = mergeRemoteIntoLocal(data.state || {});
             try { localStorage.setItem(STORE_KEY, JSON.stringify(window.state)); } catch(_){}
             if (typeof window.render === 'function') { try { window.render(); } catch(_){ } }
@@ -7417,6 +7426,9 @@ render();
     if (typeof window.applyTheme === 'function') { try { window.applyTheme(); } catch(_){ } }
     if (typeof window.render === 'function') { try { window.render(); } catch(_){ } }
     startRealtime();
+    // for debugging from console:
+window.saveCloud = saveCloud;            // NEW
+window.hydrateFromCloud = hydrateFromCloud; // NEW
   })();
 })();
 </script>
