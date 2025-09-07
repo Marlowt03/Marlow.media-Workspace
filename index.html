@@ -7312,7 +7312,34 @@ render();
         console.warn('[cloud] load error', error);
         return;
       }
+      <script>
+// Put near your cloud code, after hydrateFromCloud() is defined.
 
+function ensureLocalUsersForLogin() {
+  // If this fresh tab has no local users, give it the DEFAULT employees locally.
+  try {
+    if (!window.state) window.state = {};
+    if (!window.state.users || Object.keys(window.state.users).length === 0) {
+      if (window.DEFAULT && window.DEFAULT.users) {
+        // LOCAL ONLY: do not push users to cloud
+        window.state.users = JSON.parse(JSON.stringify(window.DEFAULT.users));
+        try { localStorage.setItem('marlow.dashboard.v23', JSON.stringify(window.state)); } catch(_) {}
+      }
+    }
+  } catch(_) {}
+}
+
+// Call this after hydrateFromCloud resolves, before startRealtime():
+(async () => {
+  await hydrateFromCloud();
+  ensureLocalUsersForLogin();
+  if (!window.state?.currentUserId) {
+    // Make sure the login actually appears
+    if (typeof window.render === 'function') window.render();
+  }
+  startRealtime();
+})();
+</script>
       if (data && data.state){
         window.state = mergeRemoteIntoLocal(data.state);
         lastRevision = data.revision || 0;
